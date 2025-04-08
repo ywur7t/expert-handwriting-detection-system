@@ -1,8 +1,9 @@
 import customtkinter
 import sqlite3
+import os
 from tkinter import filedialog, TclError
 from Analizer import Main_Predict, add_to_model
-
+from neuro import main
 
 class Table(customtkinter.CTkScrollableFrame):
     def __init__(self, parent, headers, data, *args, **kwargs):
@@ -1171,6 +1172,8 @@ class App(customtkinter.CTk):
     def predict_class(self):
         if not self.image_path.get() or self.image_path.get() == "Изображение не выбрано":
             return
+        if not os.path.exists("handwriting_model.h5"):
+            main()
         predicted_class = Main_Predict(self.image_path.get())
 
         class_map = {
