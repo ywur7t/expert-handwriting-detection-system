@@ -1,9 +1,8 @@
 import customtkinter
 import sqlite3
-import os
 from tkinter import filedialog, TclError
 from Analizer import Main_Predict, add_to_model
-from neuro import main
+
 
 class Table(customtkinter.CTkScrollableFrame):
     def __init__(self, parent, headers, data, *args, **kwargs):
@@ -1127,8 +1126,8 @@ class App(customtkinter.CTk):
                 row=5, column=0, padx=10, pady=5, sticky="w")
 
             self.scalar_feature_listbox = customtkinter.CTkComboBox(
-                self.main_frame, values=[i[0] for i in
-                                         self.SQL_Lite("get_scalar_features")],
+                self.main_frame, values=list({i[0] for i in
+                                         self.SQL_Lite("get_scalar_features")}),
                 command=self.add_scalar_feature_solve)
             self.scalar_feature_listbox.grid(
                 row=6, column=0, padx=10, pady=5, sticky="nwe")
@@ -1172,8 +1171,6 @@ class App(customtkinter.CTk):
     def predict_class(self):
         if not self.image_path.get() or self.image_path.get() == "Изображение не выбрано":
             return
-        if not os.path.exists("handwriting_model.h5"):
-            main()
         predicted_class = Main_Predict(self.image_path.get())
 
         class_map = {
@@ -1212,55 +1209,101 @@ class App(customtkinter.CTk):
         button_add.pack(pady=10)
 
     def get_task_value(self):
+        all_classes = set(row[0] for row in self.SQL_Lite("get_classes"))
 
-        logic_values = {}
-        for feature, entry in self.selected_logic_entries:
-            if entry.winfo_exists():
-                logic_values[feature] = entry.get()
+        logic_values = {
+            feature: entry.get()
+            for feature, entry in self.selected_logic_entries
+            if entry.winfo_exists()
+        }
 
-        scalar_values = {feature: var for feature,
-                         var in self.selected_scalar_features}
+        scalar_values = {
+            feature: entry.get()
+            for feature, entry in self.selected_scalar_entries
+            if entry.winfo_exists()
+        }
 
-        scalar_values = {}
-        for feature, entry in self.selected_scalar_entries:
-            if entry.winfo_exists():
-                scalar_values[feature] = entry.get()
+        range_values = {
+            feature: var.get()
+            for feature, var in self.selected_range_features
+        }
 
-        range_values = {feature: var.get()
-                        for feature, var in self.selected_range_features}
+        excluded_classes = {}
 
-        matched_classes_logic = []
+        # Опровержения по логическим признакам
         for feature, value in logic_values.items():
-            matched_classes_logic.extend(row[0] for row in self.SQL_Lite(
+            matching = set(row[0] for row in self.SQL_Lite(
                 "get_matched_classes_logic", name=feature, value1=value))
 
-        matched_classes_range = []
-        for feature, value in range_values.items():
-            matched_classes_range.extend([row[0] for row in self.SQL_Lite(
-                "get_matched_classes_range", name=feature, value1=value)])
+            present = set(row[0] for row in self.SQL_Lite(
+                "get_classes_with_logic_feature", name=feature))
 
-        matched_classes_scalar = []
+            for cls in all_classes:
+                if cls not in present:
+                    excluded_classes.setdefault(cls, []).append(
+                        f"отсутствует логический признак '{feature}'")
+                elif cls not in matching:
+                    excluded_classes.setdefault(cls, []).append(
+                        f"логический признак '{feature}' != '{value}'")
+
+        # # Опровержения по скалярам
         for feature, value in scalar_values.items():
-            matched_classes_scalar.extend([row[0] for row in self.SQL_Lite(
-                "get_matched_classes_scalar", name=feature, value1=value)])
+            matching = set(row[0] for row in self.SQL_Lite(
+                "get_matched_classes_scalar", name=feature, value1=value))
 
-        sets_to_intersect = [s for s in [set(matched_classes_logic), set(
-            matched_classes_range), set(matched_classes_scalar)] if s]
+            present = set(row[0] for row in self.SQL_Lite(
+                "get_classes_with_scalar_feature", name=feature))
 
-        common_classes = set.intersection(
-            *sets_to_intersect) if sets_to_intersect else set()
+            for cls in all_classes:
+                if cls not in present:
+                    excluded_classes.setdefault(cls, []).append(
+                        f"отсутствует скалярный признак '{feature}'")
+                elif cls not in matching:
+                    excluded_classes.setdefault(cls, []).append(
+                        f"скалярный признак '{feature}' != '{value}'")
 
-        if common_classes:
+        # Опровержения по диапазонам
+        for feature, value in range_values.items():
+            matching = set(row[0] for row in self.SQL_Lite(
+                "get_matched_classes_range", name=feature, value1=value))
 
-            class_name = ", ".join(common_classes)
-            self.show_class_solve(
-                text=f"Определённый класс почерка: {class_name}")
+            present = set(row[0] for row in self.SQL_Lite(
+                "get_classes_with_range_feature", name=feature))
+
+            for cls in all_classes:
+                if cls not in present:
+                    excluded_classes.setdefault(cls, []).append(
+                        f"отсутствует размерный признак '{feature}'")
+                elif cls not in matching:
+                    excluded_classes.setdefault(cls, []).append(
+                        f"размерный признак '{feature}' не соответствует значению '{value}'")
+
+        possible_classes = all_classes - excluded_classes.keys()
+
+        if possible_classes:
+            class_name = ", ".join(possible_classes)
+
+            reason_text = f"Определённый класс почерка: {class_name}\n\n"
+            other_exclusions = {
+                cls: reasons for cls, reasons in excluded_classes.items()
+                if cls not in possible_classes
+            }
+
+            if other_exclusions:
+                reason_text += "Остальные классы были исключены по следующим причинам:\n"
+                for cls, reasons in other_exclusions.items():
+                    reason_text += f"- Класс '{cls}' исключён, так как: {', '.join(reasons)}\n"
+
+            self.show_class_solve(text=reason_text.strip())
 
         else:
+            # Никто не подошёл
+            reason_text = "Не удалось определить класс почерка.\nПричины:\n"
+            for cls, reasons in excluded_classes.items():
+                reason_text += f"- Класс '{cls}' исключён, так как: {', '.join(reasons)}\n"
+            self.show_class_solve(text=reason_text.strip())
 
-            self.show_class_solve(text="Не удалось определить класс почерка")
-
-        return class_name if common_classes else None
+        return class_name if possible_classes else None
 
     def add_logic_feature_solve(self, feature):
         if feature not in [f[0] for f in self.selected_logic_features]:
@@ -1293,37 +1336,49 @@ class App(customtkinter.CTk):
             label.grid(row=i, column=0, padx=5, pady=2, sticky="w")
 
             if frame == self.logic_frame:
-                if values is not None:
-                    entry = customtkinter.CTkComboBox(frame, values=values)
-                else:
-                    entry = customtkinter.CTkEntry(
-                        frame, textvariable=var,
-                        placeholder_text="Введите значение")
+                entry = customtkinter.CTkComboBox(frame, values=values) if values else customtkinter.CTkEntry(
+                    frame, textvariable=var, placeholder_text="Введите значение")
                 entry.grid(row=i, column=1, padx=5, pady=2, sticky="we")
                 self.selected_logic_entries.append((feature, entry))
+                btn = customtkinter.CTkButton(frame, text="Удалить", width=60,
+                                            command=lambda f=feature: self.remove_feature_solve(f, "logic"))
+                btn.grid(row=i, column=2, padx=5, pady=2)
 
             elif frame == self.range_frame:
-                if values is not None:
-                    entry = customtkinter.CTkComboBox(frame, values=values)
-                else:
-                    entry = customtkinter.CTkEntry(
-                        frame, textvariable=var,
-                        placeholder_text="Введите значение")
+                entry = customtkinter.CTkComboBox(frame, values=values) if values else customtkinter.CTkEntry(
+                    frame, textvariable=var, placeholder_text="Введите значение")
                 entry.grid(row=i, column=1, padx=5, pady=2, sticky="we")
                 self.selected_range_entries.append((feature, entry))
+                btn = customtkinter.CTkButton(frame, text="Удалить", width=60,
+                                            command=lambda f=feature: self.remove_feature_solve(f, "range"))
+                btn.grid(row=i, column=2, padx=5, pady=2)
 
             elif frame == self.scalar_frame:
-                values = [row[1] for row in self.SQL_Lite(
-                    "get_scalar_values", name=feature)]
-
-                if values is not None:
-                    entry = customtkinter.CTkComboBox(frame, values=values)
-                else:
-                    entry = customtkinter.CTkEntry(
-                        frame, textvariable=var,
-                        placeholder_text="Введите значение")
+                values = [row[1] for row in self.SQL_Lite("get_scalar_values", name=feature)]
+                entry = customtkinter.CTkComboBox(frame, values=values) if values else customtkinter.CTkEntry(
+                    frame, textvariable=var, placeholder_text="Введите значение")
                 entry.grid(row=i, column=1, padx=5, pady=2, sticky="we")
                 self.selected_scalar_entries.append((feature, entry))
+                btn = customtkinter.CTkButton(frame, text="Удалить", width=60,
+                                            command=lambda f=feature: self.remove_feature_solve(f, "scalar"))
+                btn.grid(row=i, column=2, padx=5, pady=2)
+
+    def remove_feature_solve(self, feature, feature_type):
+        if feature_type == "logic":
+            self.selected_logic_features = [f for f in self.selected_logic_features if f[0] != feature]
+            self.selected_logic_entries = [e for e in self.selected_logic_entries if e[0] != feature]
+            self.update_feature_entries_solve(self.logic_frame, self.selected_logic_features, values=["Да", "Нет"])
+
+        elif feature_type == "scalar":
+            self.selected_scalar_features = [f for f in self.selected_scalar_features if f[0] != feature]
+            self.selected_scalar_entries = [e for e in self.selected_scalar_entries if e[0] != feature]
+            self.update_feature_entries_solve(self.scalar_frame, self.selected_scalar_features)
+
+        elif feature_type == "range":
+            self.selected_range_features = [f for f in self.selected_range_features if f[0] != feature]
+            self.selected_range_entries = [e for e in self.selected_range_entries if e[0] != feature]
+            self.update_feature_entries_solve(self.range_frame, self.selected_range_features)
+
 
     def write_feature_values(self):
         ...
@@ -1612,7 +1667,22 @@ class App(customtkinter.CTk):
                     "SELECT Class_Name FROM Class_Scalar_Feature WHERE Scalar_Feature = ? AND Value = ?", (name, value1))
                 rows = cursor.fetchall()
                 return rows
+            if task == "get_classes_with_logic_feature":
+                cursor.execute(
+                    "SELECT DISTINCT Class_Name FROM Class_Logic_Features WHERE Logic_Feature = ?", (name,))
+                rows = cursor.fetchall()
+                return rows
+            if task == "get_classes_with_scalar_feature":
+                cursor.execute(
+                    "SELECT DISTINCT Class_Name FROM Class_Scalar_Feature WHERE Scalar_Feature = ?", (name,))
+                rows = cursor.fetchall()
+                return rows
 
+            if task == "get_classes_with_range_feature":
+                cursor.execute(
+                    "SELECT DISTINCT Class_Name FROM Class_Range_Feature WHERE Range_Feature = ?", (name,))
+                rows = cursor.fetchall()
+                return rows
         if "remove" in task:
 
             if "Class_Logic_Feature" in task:
